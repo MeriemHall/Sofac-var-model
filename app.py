@@ -160,14 +160,14 @@ def train_var_model(df):
     return results, df_diff, optimal_lag
 
 @st.cache_data
-def generate_var_forecast(results, df_diff, df_original, forecast_months=60):
+def generate_var_forecast(_results, df_diff, df_original, forecast_months=60):
     """Generate VAR forecast"""
     # Get initial values for forecasting
-    lag_order = results.k_ar
+    lag_order = _results.k_ar
     initial_values = df_diff.values[-lag_order:]
     
     # Generate forecast
-    forecast = results.forecast(y=initial_values, steps=forecast_months)
+    forecast = _results.forecast(y=initial_values, steps=forecast_months)
     
     # Create future dates
     last_date = df_original.index[-1]
@@ -595,3 +595,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
