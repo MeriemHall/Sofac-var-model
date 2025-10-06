@@ -356,7 +356,7 @@ def main():
             st.rerun()
     
     # Main tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Validation", "Prédictions", "Analyse Décisionnelle", "Méthodologie"])
+    tab1, tab2, tab3 = st.tabs(["Validation", "Prédictions", "Analyse Décisionnelle"])
     
     with tab1:
         st.header("Validation du Modèle sur Données Historiques")
@@ -602,102 +602,6 @@ def main():
             <p><strong>Justification:</strong> {final_reason}</p>
             <p><strong>Horizon d'analyse:</strong> {analysis['Cas_de_Base']['analysis_period']} ans (horizon de prédiction fiable)</p>
             <p><strong>Précision du modèle:</strong> ±{st.session_state.validation['mae']:.3f}% (MAE historique)</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with tab4:
-        st.header("Méthodologie et Limitations")
-        
-        st.subheader("Approche Méthodologique")
-        
-        st.markdown("""
-        ### 1. Modèle VAR (Vector Autoregression)
-        
-        Le modèle utilise une approche vectorielle autorégressive qui capture les interdépendances entre:
-        - Taux directeur de Bank Al-Maghrib
-        - Inflation sous-jacente
-        - Rendement des bons du Trésor 52 semaines
-        
-        **Avantages:**
-        - Capture les relations dynamiques entre variables économiques
-        - Méthodologie standard en économétrie et banque centrale
-        - Permet de modéliser les effets de transmission de la politique monétaire
-        
-        ### 2. Processus de Validation
-        
-        Le modèle a été validé par une approche de "backtesting":
-        1. Entraînement sur données historiques (jusqu'à il y a 12 mois)
-        2. Prédiction des 12 derniers mois
-        3. Comparaison avec les valeurs réelles observées
-        4. Calcul des métriques d'erreur (MAE, RMSE, MAPE)
-        
-        Cette validation donne une mesure objective de la précision attendue.
-        
-        ### 3. Génération des Scénarios
-        
-        Les trois scénarios ne sont pas arbitraires:
-        - **Cas de Base:** Prédiction centrale du modèle VAR
-        - **Conservateur:** Borne supérieure (+1.5 × MAE historique)
-        - **Optimiste:** Borne inférieure (-1.5 × MAE historique)
-        
-        Ces intervalles reflètent l'incertitude historique du modèle.
-        """)
-        
-        st.subheader("Limitations Importantes")
-        
-        st.markdown(f"""
-        <div class="warning-box">
-            <h4>🔍 Facteurs Non Pris en Compte</h4>
-            <ul>
-                <li>Chocs économiques imprévisibles (crises, pandémies, etc.)</li>
-                <li>Changements de politique monétaire non anticipés</li>
-                <li>Événements géopolitiques</li>
-                <li>Modifications structurelles de l'économie</li>
-                <li>Conditions climatiques extrêmes (sécheresse, etc.)</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        ### Fiabilité par Horizon
-        
-        | Horizon | Fiabilité | Utilisation Recommandée |
-        |---------|-----------|------------------------|
-        | 1-3 mois | Très élevée | Décisions tactiques |
-        | 3-6 mois | Élevée | Planification court terme |
-        | 6-12 mois | Moyenne | Analyse de tendances |
-        | 12-24 mois | Limitée | Scénarios exploratoires |
-        | >24 mois | Très faible | Non recommandé |
-        
-        ### Recommandations d'Usage
-        
-        ✅ **Utilisations appropriées:**
-        - Comparer taux fixe vs variable sur 2 ans maximum
-        - Identifier les tendances à court terme
-        - Évaluer différents scénarios économiques
-        - Analyse de sensibilité des décisions de financement
-        
-        ❌ **Utilisations inappropriées:**
-        - Prédire avec certitude les taux futurs
-        - Planifier des stratégies au-delà de 2 ans
-        - Prendre des décisions sans considérer d'autres facteurs
-        - Ignorer les avis d'experts et les indicateurs avancés
-        
-        ### Mise à Jour du Modèle
-        
-        Le modèle doit être régulièrement recalibré:
-        - Ajout des nouvelles données mensuelles publiées par BAM
-        - Revalidation trimestrielle des performances
-        - Ajustement des paramètres si la précision se dégrade
-        """)
-        
-        st.markdown(f"""
-        <div class="validation-box">
-            <h4>📊 Performance Actuelle du Modèle</h4>
-            <p><strong>Erreur moyenne (MAE):</strong> ±{st.session_state.validation['mae']:.3f}%</p>
-            <p><strong>Erreur relative (MAPE):</strong> {st.session_state.validation['mape']:.2f}%</p>
-            <p><strong>Dernière validation:</strong> {st.session_state.validation['test_start_date'].strftime('%B %Y')} - {st.session_state.validation['actual'].index[-1].strftime('%B %Y')}</p>
-            <p><strong>Données historiques:</strong> {len(st.session_state.df)} mois ({st.session_state.df.index[0].strftime('%B %Y')} - {st.session_state.df.index[-1].strftime('%B %Y')})</p>
         </div>
         """, unsafe_allow_html=True)
     
