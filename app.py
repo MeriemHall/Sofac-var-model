@@ -398,7 +398,7 @@ def main():
         # Predictions
         colors = {'Conservateur': '#dc3545', 'Cas_de_Base': '#17a2b8', 'Optimiste': '#28a745'}
         for scenario_name, scenario_df in st.session_state.scenarios.items():
-            sample_data = scenario_df[::3]  # Sample every 3 months
+            sample_data = scenario_df  # Sample every 3 months
             fig.add_trace(go.Scatter(
                 x=sample_data.index,
                 y=sample_data['Treasury_Yield'],
@@ -444,7 +444,7 @@ def main():
         fig_detail = go.Figure()
         
         # Sample data for clarity
-        sample_data = pred_data[::3]
+        sample_data = pred_data
         
         fig_detail.add_trace(go.Scatter(
             x=sample_data.index,
@@ -595,4 +595,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
