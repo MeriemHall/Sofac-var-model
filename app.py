@@ -4,9 +4,8 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from statsmodels.tsa.api import VAR
-from statsmodels.tsa.stattools import adfuller
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 import warnings
-import base64
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
@@ -70,6 +69,20 @@ st.markdown(f"""
         margin: 2rem 0;
         box-shadow: 0 10px 40px rgba(102, 126, 234, 0.3);
     }}
+    .validation-box {{
+        background: #e8f5e9;
+        border-left: 4px solid #4caf50;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }}
+    .warning-box {{
+        background: #fff3cd;
+        border-left: 4px solid #ffc107;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }}
     .stMetric label {{ font-size: 0.75rem !important; }}
     h1 {{ font-size: 1.4rem !important; }}
     h2 {{ font-size: 1.2rem !important; }}
@@ -81,10 +94,8 @@ st.markdown(f"""
 def load_and_prepare_data():
     """Load CSV data and prepare for VAR modeling"""
     try:
-        # Try to load the CSV file
         df = pd.read_csv('sofac csv.csv', sep=';', parse_dates=['Date (Monthly)'])
         
-        # Rename columns
         cols = {
             'Date (Monthly)': 'Date',
             'Taux Directeur (%)2': 'Policy_Rate',
@@ -92,46 +103,37 @@ def load_and_prepare_data():
             '52 semaines': 'Treasury_Yield'
         }
         df = df.rename(columns=cols)
-        
-        # Set date as index and sort
         df = df.set_index('Date').sort_index()
         
-        # Convert columns to numeric
         for col in ['Policy_Rate', 'Inflation', 'Treasury_Yield']:
             df[col] = df[col].astype(str).str.replace(',', '.').astype(float)
         
-        # Interpolate missing values
         df = df.interpolate()
-        
         return df
-    except FileNotFoundError:
-        # If file not found, create sample data matching the structure
-        st.warning("CSV file not found. Using sample data for demonstration.")
-        dates = pd.date_range(start='2020-01-01', end='2025-06-01', freq='M')
         
-        # Generate realistic sample data
+    except FileNotFoundError:
+        st.warning("CSV file not found. Using sample data for demonstration.")
+        dates = pd.date_range(start='2018-03-01', end='2025-09-01', freq='M')
+        
         np.random.seed(42)
         n = len(dates)
         
         policy_rate = np.concatenate([
-            np.linspace(2.0, 1.5, 12),  # 2020
-            np.full(12, 1.5),            # 2021
-            np.linspace(1.5, 3.0, 12),  # 2022
-            np.full(12, 3.0),            # 2023
-            np.linspace(3.0, 2.5, 12),  # 2024
-            np.linspace(2.5, 2.25, 6)   # 2025
+            np.linspace(2.25, 1.5, 28),
+            np.full(12, 1.5),
+            np.linspace(1.5, 3.0, 12),
+            np.full(12, 3.0),
+            np.linspace(3.0, 2.25, 26)
         ])[:n]
         
         inflation = np.concatenate([
-            np.linspace(0.8, 0.3, 12),
-            np.linspace(0.6, 3.6, 12),
-            np.linspace(4.8, 7.4, 12),
+            np.linspace(1.0, 0.8, 12),
+            np.linspace(0.8, 7.9, 24),
             np.linspace(7.9, 4.4, 12),
-            np.linspace(2.1, 2.3, 12),
-            np.linspace(1.4, 1.3, 6)
+            np.linspace(4.4, 1.3, 42)
         ])[:n]
         
-        treasury_yield = policy_rate + np.random.normal(0, 0.3, n) + inflation * 0.1
+        treasury_yield = policy_rate + np.random.normal(0, 0.2, n) + inflation * 0.05
         
         df = pd.DataFrame({
             'Policy_Rate': policy_rate,
@@ -142,34 +144,60 @@ def load_and_prepare_data():
         return df
 
 @st.cache_data
+def validate_model(df, test_months=12):
+    """Validate model on recent data"""
+    train_df = df.iloc[:-test_months]
+    test_df = df.iloc[-test_months:]
+    
+    # Train on historical data
+    train_diff = train_df.diff().dropna()
+    model = VAR(train_diff)
+    results = model.fit(maxlags=12, ic='aic')
+    
+    # Forecast test period
+    lag_order = results.k_ar
+    initial_values = train_diff.values[-lag_order:]
+    forecast = results.forecast(y=initial_values, steps=test_months)
+    
+    # Convert back to levels
+    forecast_df = pd.DataFrame(forecast, columns=train_df.columns, index=test_df.index)
+    predicted_levels = forecast_df.cumsum() + train_df.iloc[-1]
+    
+    # Calculate errors
+    mae = mean_absolute_error(test_df['Treasury_Yield'], predicted_levels['Treasury_Yield'])
+    rmse = np.sqrt(mean_squared_error(test_df['Treasury_Yield'], predicted_levels['Treasury_Yield']))
+    mape = np.mean(np.abs((test_df['Treasury_Yield'] - predicted_levels['Treasury_Yield']) / test_df['Treasury_Yield'])) * 100
+    
+    return {
+        'actual': test_df,
+        'predicted': predicted_levels,
+        'mae': mae,
+        'rmse': rmse,
+        'mape': mape,
+        'train_end_date': train_df.index[-1],
+        'test_start_date': test_df.index[0]
+    }
+
+@st.cache_data
 def train_var_model(df):
-    """Train VAR model on differenced data"""
-    # Difference the data to make it stationary
+    """Train VAR model on full dataset"""
     df_diff = df.diff().dropna()
-    
-    # Fit VAR model
     model = VAR(df_diff)
-    
-    # Select optimal lag order (max 12 months)
     lag_order = model.select_order(maxlags=12)
     optimal_lag = lag_order.aic
-    
-    # Fit with optimal lags
     results = model.fit(maxlags=optimal_lag, ic='aic')
     
     return results, df_diff, optimal_lag
 
 @st.cache_data
-def generate_var_forecast(_results, df_diff, df_original, forecast_months=60):
-    """Generate VAR forecast"""
-    # Get initial values for forecasting
+def generate_var_forecast(_results, df_diff, df_original, forecast_months=24):
+    """Generate VAR forecast for 24 months (2 years)"""
     lag_order = _results.k_ar
     initial_values = df_diff.values[-lag_order:]
     
-    # Generate forecast
+    # Generate point forecast
     forecast = _results.forecast(y=initial_values, steps=forecast_months)
     
-    # Create future dates
     last_date = df_original.index[-1]
     future_dates = pd.date_range(
         start=last_date + pd.DateOffset(months=1),
@@ -177,53 +205,53 @@ def generate_var_forecast(_results, df_diff, df_original, forecast_months=60):
         freq='M'
     )
     
-    # Create forecast dataframe
-    forecast_df = pd.DataFrame(
-        forecast,
-        columns=df_original.columns,
-        index=future_dates
-    )
-    
-    # Convert differenced forecast back to levels
+    forecast_df = pd.DataFrame(forecast, columns=df_original.columns, index=future_dates)
     last_actual = df_original.iloc[-1]
     predicted = forecast_df.cumsum() + last_actual
     
     return predicted, forecast_df
 
-def generate_scenarios(predicted_base, forecast_months=60):
-    """Generate optimistic and conservative scenarios"""
+def generate_scenarios_with_uncertainty(base_prediction, validation_mae):
+    """Generate scenarios with uncertainty bands based on validation"""
     scenarios = {}
     
-    # Base case
-    scenarios['Cas_de_Base'] = predicted_base.copy()
+    # Base case - the point forecast
+    scenarios['Cas_de_Base'] = base_prediction.copy()
     
-    # Conservative scenario (higher rates)
-    conservative = predicted_base.copy()
-    conservative['Policy_Rate'] = conservative['Policy_Rate'] + 0.3
-    conservative['Treasury_Yield'] = conservative['Treasury_Yield'] + 0.25
-    conservative['Inflation'] = conservative['Inflation'] + 0.2
+    # Conservative scenario - upper bound (mean + 1.5 * MAE)
+    conservative = base_prediction.copy()
+    conservative['Treasury_Yield'] = conservative['Treasury_Yield'] + 1.5 * validation_mae
+    conservative['Policy_Rate'] = conservative['Policy_Rate'] + 1.2 * validation_mae
+    conservative['Inflation'] = conservative['Inflation'] + 0.3
     scenarios['Conservateur'] = conservative
     
-    # Optimistic scenario (lower rates)
-    optimistic = predicted_base.copy()
-    optimistic['Policy_Rate'] = optimistic['Policy_Rate'] - 0.25
-    optimistic['Treasury_Yield'] = optimistic['Treasury_Yield'] - 0.2
-    optimistic['Inflation'] = optimistic['Inflation'] - 0.15
+    # Optimistic scenario - lower bound (mean - 1.5 * MAE)
+    optimistic = base_prediction.copy()
+    optimistic['Treasury_Yield'] = optimistic['Treasury_Yield'] - 1.5 * validation_mae
+    optimistic['Policy_Rate'] = optimistic['Policy_Rate'] - 1.2 * validation_mae
+    optimistic['Inflation'] = optimistic['Inflation'] - 0.3
     scenarios['Optimiste'] = optimistic
+    
+    # Apply realistic bounds
+    for scenario in scenarios.values():
+        scenario['Treasury_Yield'] = np.clip(scenario['Treasury_Yield'], 0.5, 5.0)
+        scenario['Policy_Rate'] = np.clip(scenario['Policy_Rate'], 0.5, 4.5)
+        scenario['Inflation'] = np.clip(scenario['Inflation'], 0.2, 4.0)
     
     return scenarios
 
 def calculate_loan_analysis(scenarios, loan_amount, loan_duration, fixed_rate, risk_premium):
-    """Calculate loan cost analysis for each scenario"""
+    """Calculate loan cost analysis - adjusted for 2-year max horizon"""
     analysis_results = {}
     
+    # Limit loan duration to available prediction horizon
+    max_duration = min(loan_duration, 2)  # 2 years max for predictions
+    
     for scenario_name, scenario_df in scenarios.items():
-        # Get relevant years
-        years_data = scenario_df.head(loan_duration * 12)
+        years_data = scenario_df.head(max_duration * 12)
         
-        # Calculate annual variable rates
         variable_rates_annual = []
-        for year in range(loan_duration):
+        for year in range(max_duration):
             start_month = year * 12
             end_month = min((year + 1) * 12, len(years_data))
             
@@ -233,14 +261,13 @@ def calculate_loan_analysis(scenarios, loan_amount, loan_duration, fixed_rate, r
                 effective_rate = avg_treasury_yield + risk_premium
                 variable_rates_annual.append(effective_rate)
         
-        # Calculate costs
-        fixed_cost_total = (fixed_rate / 100) * loan_amount * 1_000_000 * loan_duration
+        # Calculate costs only for available period
+        fixed_cost_total = (fixed_rate / 100) * loan_amount * 1_000_000 * max_duration
         variable_cost_total = sum([(rate / 100) * loan_amount * 1_000_000 
                                    for rate in variable_rates_annual])
         
         cost_difference = variable_cost_total - fixed_cost_total
         
-        # Risk metrics
         volatility = years_data['Treasury_Yield'].std()
         max_rate = max(variable_rates_annual) if variable_rates_annual else 0
         min_rate = min(variable_rates_annual) if variable_rates_annual else 0
@@ -253,7 +280,8 @@ def calculate_loan_analysis(scenarios, loan_amount, loan_duration, fixed_rate, r
             'cost_difference': cost_difference,
             'volatility': volatility,
             'max_rate': max_rate,
-            'min_rate': min_rate
+            'min_rate': min_rate,
+            'analysis_period': max_duration
         }
     
     return analysis_results
@@ -271,23 +299,28 @@ def main():
         <div style="background: linear-gradient(135deg, #1e3c72 0%, #2a5298 50%, #3d5aa3 100%); 
                     padding: 2rem; border-radius: 12px; color: white; margin-bottom: 2rem;
                     box-shadow: 0 8px 32px rgba(0,0,0,0.2);">
-            <h1 style="margin: 0; color: white;">Modèle VAR - Prédiction des Rendements</h1>
-            <p style="margin: 0.5rem 0; color: white;">Analyse Vectorielle Autorégressive 52-Semaines</p>
-            <p style="margin: 0; color: white;">Données Bank Al-Maghrib | Méthodologie VAR Avancée</p>
+            <h1 style="margin: 0; color: white;">Modèle VAR Validé - Prédiction 52-Semaines</h1>
+            <p style="margin: 0.5rem 0; color: white;">Analyse Vectorielle Autorégressive avec Validation Historique</p>
+            <p style="margin: 0; color: white;">Horizon de Prédiction: 24 Mois (2 Ans)</p>
         </div>
         """, unsafe_allow_html=True)
     
-    # Load data and train model
+    # Load data and models
     if 'data_loaded' not in st.session_state:
-        with st.spinner("Chargement des données et calibration du modèle VAR..."):
+        with st.spinner("Chargement et validation du modèle..."):
             st.session_state.df = load_and_prepare_data()
+            st.session_state.validation = validate_model(st.session_state.df, test_months=12)
             st.session_state.var_results, st.session_state.df_diff, st.session_state.optimal_lag = train_var_model(st.session_state.df)
             st.session_state.predicted, st.session_state.forecast_diff = generate_var_forecast(
                 st.session_state.var_results,
                 st.session_state.df_diff,
-                st.session_state.df
+                st.session_state.df,
+                forecast_months=24
             )
-            st.session_state.scenarios = generate_scenarios(st.session_state.predicted)
+            st.session_state.scenarios = generate_scenarios_with_uncertainty(
+                st.session_state.predicted,
+                st.session_state.validation['mae']
+            )
             st.session_state.data_loaded = True
     
     # Sidebar
@@ -295,97 +328,146 @@ def main():
         logo_svg = create_sofac_logo_svg()
         st.markdown(f'<div style="text-align: center; margin-bottom: 1rem; padding: 1rem; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">{logo_svg}</div>', unsafe_allow_html=True)
         
-        st.header("Informations du Modèle")
+        st.header("Performance du Modèle")
         
-        st.markdown("### Configuration VAR")
-        st.metric("Ordre de Retard Optimal", f"{st.session_state.optimal_lag} mois")
-        st.metric("Période Historique", f"{len(st.session_state.df)} mois")
-        st.metric("Horizon de Prédiction", "60 mois (5 ans)")
+        val = st.session_state.validation
         
-        # Current values
-        st.markdown("### Valeurs Actuelles")
+        st.markdown('<div class="validation-box">', unsafe_allow_html=True)
+        st.markdown("### Validation Historique")
+        st.metric("Erreur Moyenne (MAE)", f"±{val['mae']:.3f}%")
+        st.metric("RMSE", f"±{val['rmse']:.3f}%")
+        st.metric("MAPE", f"{val['mape']:.2f}%")
+        st.caption(f"Testé sur {val['test_start_date'].strftime('%b %Y')} - {val['actual'].index[-1].strftime('%b %Y')}")
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown("### Configuration")
+        st.metric("Ordre de Retard", f"{st.session_state.optimal_lag} mois")
+        st.metric("Données Historiques", f"{len(st.session_state.df)} mois")
+        st.metric("Horizon Prédiction", "24 mois")
+        
         last_values = st.session_state.df.iloc[-1]
+        st.markdown("### Valeurs Actuelles")
         st.metric("Taux Directeur", f"{last_values['Policy_Rate']:.2f}%")
         st.metric("Inflation", f"{last_values['Inflation']:.2f}%")
         st.metric("Rendement 52s", f"{last_values['Treasury_Yield']:.2f}%")
-        
-        # Strategic outlook
-        st.markdown("---")
-        st.subheader("🎯 Vision Stratégique")
-        
-        cas_base = st.session_state.scenarios['Cas_de_Base']
-        three_month_avg = cas_base.head(3)['Treasury_Yield'].mean()
-        current_yield = last_values['Treasury_Yield']
-        trend = "↗️ Hausse" if three_month_avg > current_yield else "↘️ Baisse"
-        
-        st.metric("Tendance 3 mois", f"{three_month_avg:.2f}%", delta=trend)
-        
-        six_month_data = cas_base.head(6)
-        st.metric("Fourchette 6 mois",
-                 f"{six_month_data['Treasury_Yield'].min():.2f}%-{six_month_data['Treasury_Yield'].max():.2f}%")
         
         if st.sidebar.button("Actualiser"):
             st.cache_data.clear()
             st.rerun()
     
     # Main tabs
-    tab1, tab2, tab3 = st.tabs(["Vue d'Ensemble", "Prédictions Détaillées", "Analyse Décisionnelle"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Validation", "Prédictions", "Analyse Décisionnelle", "Méthodologie"])
     
     with tab1:
-        st.markdown('<div class="executive-dashboard">', unsafe_allow_html=True)
-        st.markdown('<div style="text-align: center; font-size: 1.4rem; font-weight: 700; margin-bottom: 2rem;">Tableau de Bord Stratégique VAR</div>', unsafe_allow_html=True)
+        st.header("Validation du Modèle sur Données Historiques")
         
-        # Strategic metrics
-        cas_base = st.session_state.scenarios['Cas_de_Base']
-        q1_avg = cas_base.head(3)['Treasury_Yield'].mean()
-        q2_avg = cas_base.head(6)['Treasury_Yield'].mean()
-        year1_avg = cas_base.head(12)['Treasury_Yield'].mean()
+        val = st.session_state.validation
         
-        col1, col2, col3, col4 = st.columns(4)
+        st.markdown(f"""
+        <div class="validation-box">
+            <h3>Test de Performance Rétrospective</h3>
+            <p><strong>Méthode:</strong> Le modèle a été entraîné sur les données jusqu'à {val['train_end_date'].strftime('%B %Y')}, 
+            puis a prédit les 12 mois suivants. Les prédictions sont comparées aux valeurs réelles.</p>
+        </div>
+        """, unsafe_allow_html=True)
         
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.markdown(f"""
-            <div class="metric-box">
-                <div style="color: #6c757d; font-size: 0.8rem; margin-bottom: 0.5rem;">HORIZON 3 MOIS</div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: #2c3e50;">{q1_avg:.2f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Erreur Absolue Moyenne", f"±{val['mae']:.3f}%", 
+                     help="En moyenne, les prédictions sont à ±{:.3f}% de la réalité".format(val['mae']))
         with col2:
-            st.markdown(f"""
-            <div class="metric-box">
-                <div style="color: #6c757d; font-size: 0.8rem; margin-bottom: 0.5rem;">HORIZON 6 MOIS</div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: #2c3e50;">{q2_avg:.2f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("RMSE", f"±{val['rmse']:.3f}%",
+                     help="Erreur quadratique moyenne")
         with col3:
-            st.markdown(f"""
-            <div class="metric-box">
-                <div style="color: #6c757d; font-size: 0.8rem; margin-bottom: 0.5rem;">HORIZON 12 MOIS</div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: #2c3e50;">{year1_avg:.2f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.metric("Erreur Relative (MAPE)", f"{val['mape']:.2f}%",
+                     help="Erreur en pourcentage de la valeur réelle")
         
-        with col4:
-            volatility = cas_base.head(12)['Treasury_Yield'].std()
-            risk_level = "Faible" if volatility < 0.3 else "Modéré" if volatility < 0.6 else "Élevé"
-            st.markdown(f"""
-            <div class="metric-box">
-                <div style="color: #6c757d; font-size: 0.8rem; margin-bottom: 0.5rem;">VOLATILITÉ</div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: #2c3e50;">{risk_level}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        # Validation chart
+        fig_val = go.Figure()
         
-        st.markdown('</div>', unsafe_allow_html=True)
+        fig_val.add_trace(go.Scatter(
+            x=val['actual'].index,
+            y=val['actual']['Treasury_Yield'],
+            mode='lines+markers',
+            name='Valeurs Réelles',
+            line=dict(color='#2a5298', width=3),
+            marker=dict(size=8)
+        ))
         
-        # Chart
-        st.subheader("Évolution des Rendements - Modèle VAR")
+        fig_val.add_trace(go.Scatter(
+            x=val['predicted'].index,
+            y=val['predicted']['Treasury_Yield'],
+            mode='lines+markers',
+            name='Prédictions du Modèle',
+            line=dict(color='#dc3545', width=3, dash='dash'),
+            marker=dict(size=8)
+        ))
         
+        fig_val.update_layout(
+            title="Comparaison: Prédictions vs Réalité (Période de Test)",
+            height=450,
+            template="plotly_white",
+            xaxis_title="Date",
+            yaxis_title="Rendement 52-Semaines (%)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+        )
+        
+        st.plotly_chart(fig_val, use_container_width=True)
+        
+        # Interpretation
+        if val['mape'] < 5:
+            quality = "EXCELLENT"
+            color = "#28a745"
+            interpretation = "Le modèle a une très bonne précision pour des prédictions à court terme (12 mois)."
+        elif val['mape'] < 10:
+            quality = "BON"
+            color = "#17a2b8"
+            interpretation = "Le modèle offre une précision acceptable pour la planification financière."
+        elif val['mape'] < 15:
+            quality = "MOYEN"
+            color = "#ffc107"
+            interpretation = "Le modèle capture les tendances générales mais avec une marge d'erreur notable."
+        else:
+            quality = "LIMITÉ"
+            color = "#dc3545"
+            interpretation = "La précision est limitée. Utiliser principalement pour l'analyse de scénarios."
+        
+        st.markdown(f"""
+        <div style="background: {color}22; border-left: 4px solid {color}; padding: 1rem; border-radius: 8px; margin: 1rem 0;">
+            <h4 style="color: {color}; margin: 0;">Niveau de Précision: {quality}</h4>
+            <p style="margin: 0.5rem 0 0 0;">{interpretation}</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with tab2:
+        st.header("Prédictions VAR - Horizon 24 Mois")
+        
+        st.markdown("""
+        <div class="warning-box">
+            <strong>Important:</strong> Les prédictions sont plus fiables à court terme (3-6 mois) 
+            et deviennent plus incertaines au-delà de 12 mois. Les scénarios représentent 
+            une fourchette d'incertitude basée sur la performance historique du modèle.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        cas_base = st.session_state.scenarios['Cas_de_Base']
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Rendement Moyen (24m)", f"{cas_base['Treasury_Yield'].mean():.2f}%")
+        with col2:
+            st.metric("Fourchette", 
+                     f"{cas_base['Treasury_Yield'].min():.2f}% - {cas_base['Treasury_Yield'].max():.2f}%")
+        with col3:
+            current = st.session_state.df.iloc[-1]['Treasury_Yield']
+            change = cas_base['Treasury_Yield'].mean() - current
+            st.metric("Variation Moyenne", f"{change:+.2f}%")
+        
+        # Main prediction chart
         fig = go.Figure()
         
         # Historical data
-        df_hist = st.session_state.df.tail(12)
+        df_hist = st.session_state.df.tail(24)
         fig.add_trace(go.Scatter(
             x=df_hist.index,
             y=df_hist['Treasury_Yield'],
@@ -398,10 +480,9 @@ def main():
         # Predictions
         colors = {'Conservateur': '#dc3545', 'Cas_de_Base': '#17a2b8', 'Optimiste': '#28a745'}
         for scenario_name, scenario_df in st.session_state.scenarios.items():
-            sample_data = scenario_df  # Sample every 3 months
             fig.add_trace(go.Scatter(
-                x=sample_data.index,
-                y=sample_data['Treasury_Yield'],
+                x=scenario_df.index,
+                y=scenario_df['Treasury_Yield'],
                 mode='lines+markers',
                 name=scenario_name,
                 line=dict(color=colors[scenario_name], width=3),
@@ -413,79 +494,25 @@ def main():
                      annotation_text=f"Actuel: {current_yield:.2f}%")
         
         fig.update_layout(
-            height=450,
+            height=500,
             template="plotly_white",
-            xaxis_title="Période",
+            xaxis_title="Date",
             yaxis_title="Rendement 52-Semaines (%)",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
         )
         
         st.plotly_chart(fig, use_container_width=True)
-    
-    with tab2:
-        st.header("Prédictions Détaillées VAR")
         
-        scenario_choice = st.selectbox("Choisissez un scénario:",
-                                      ['Cas_de_Base', 'Conservateur', 'Optimiste'])
+        # Confidence intervals
+        st.subheader("Intervalles de Confiance")
+        st.markdown(f"""
+        Les scénarios sont construits à partir de la validation historique:
+        - **Conservateur**: Prédiction + 1.5 × MAE ({st.session_state.validation['mae']:.3f}%)
+        - **Cas de Base**: Prédiction du modèle VAR
+        - **Optimiste**: Prédiction - 1.5 × MAE
         
-        pred_data = st.session_state.scenarios[scenario_choice]
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Rendement Moyen", f"{pred_data['Treasury_Yield'].mean():.2f}%")
-        with col2:
-            st.metric("Rendement Min", f"{pred_data['Treasury_Yield'].min():.2f}%")
-        with col3:
-            st.metric("Rendement Max", f"{pred_data['Treasury_Yield'].max():.2f}%")
-        
-        # Detailed multivariate chart
-        st.subheader(f"Prédictions Multivariées - {scenario_choice}")
-        
-        fig_detail = go.Figure()
-        
-        # Sample data for clarity
-        sample_data = pred_data
-        
-        fig_detail.add_trace(go.Scatter(
-            x=sample_data.index,
-            y=sample_data['Treasury_Yield'],
-            name='Rendement 52s',
-            line=dict(color='#2a5298', width=3)
-        ))
-        
-        fig_detail.add_trace(go.Scatter(
-            x=sample_data.index,
-            y=sample_data['Policy_Rate'],
-            name='Taux Directeur',
-            line=dict(color='#dc3545', width=2, dash='dash')
-        ))
-        
-        fig_detail.add_trace(go.Scatter(
-            x=sample_data.index,
-            y=sample_data['Inflation'],
-            name='Inflation',
-            line=dict(color='#28a745', width=2, dash='dot')
-        ))
-        
-        fig_detail.update_layout(
-            height=500,
-            template="plotly_white",
-            xaxis_title="Date",
-            yaxis_title="Valeur (%)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
-        )
-        
-        st.plotly_chart(fig_detail, use_container_width=True)
-        
-        # Export
-        if st.button("Télécharger les Prédictions"):
-            csv = pred_data.to_csv()
-            st.download_button(
-                label="Télécharger CSV",
-                data=csv,
-                file_name=f"sofac_var_predictions_{scenario_choice.lower()}_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
+        Ces intervalles reflètent l'incertitude historique du modèle.
+        """)
     
     with tab3:
         st.header("Analyse Décisionnelle")
@@ -493,25 +520,33 @@ def main():
         st.markdown("""
         <div style="background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); 
                     color: white; padding: 1.5rem; border-radius: 12px; margin: 1rem 0;">
-            <h3 style="margin: 0; color: white;">🏦 AIDE À LA DÉCISION EMPRUNT SOFAC</h3>
-            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Analyse comparative Taux Fixe vs Taux Variable (Modèle VAR)</p>
+            <h3 style="margin: 0; color: white;">Aide à la Décision Emprunt SOFAC</h3>
+            <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Analyse sur horizon de prédiction fiable (maximum 2 ans)</p>
         </div>
         """, unsafe_allow_html=True)
         
-        # Loan parameters
-        st.subheader("⚙️ Paramètres de l'Emprunt")
+        st.subheader("Paramètres de l'Emprunt")
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             loan_amount = st.slider("Montant (millions MAD):", 1, 500, 50)
         with col2:
-            loan_duration = st.slider("Durée (années):", 1, 5, 5)
+            loan_duration = st.slider("Durée (années):", 1, 5, 2)
         with col3:
             fixed_rate = st.number_input("Taux fixe (%):", min_value=1.0, max_value=10.0, value=3.2, step=0.1)
         with col4:
             risk_premium = st.number_input("Prime de risque (%):", min_value=0.5, max_value=3.0, value=1.3, step=0.1)
         
-        # Calculate analysis
+        # Warning for long duration
+        if loan_duration > 2:
+            st.markdown("""
+            <div class="warning-box">
+                <strong>⚠️ Attention:</strong> La durée sélectionnée ({} ans) dépasse l'horizon de prédiction fiable (2 ans). 
+                L'analyse sera limitée aux 2 premières années. Pour les années suivantes, l'incertitude est trop élevée 
+                pour fournir des prédictions significatives.
+            </div>
+            """.format(loan_duration), unsafe_allow_html=True)
+        
         analysis = calculate_loan_analysis(
             st.session_state.scenarios,
             loan_amount,
@@ -521,28 +556,24 @@ def main():
         )
         
         # Decision matrix
-        st.subheader("📊 Matrice de Décision VAR")
+        st.subheader("Matrice de Décision")
         
         decision_data = []
         for scenario_name, result in analysis.items():
             if result['cost_difference'] < 0:
                 recommendation = "TAUX VARIABLE"
-                savings = abs(result['cost_difference'])
-                decision_text = f"Économie: {savings:,.0f} MAD"
-                decision_color = "#28a745"
+                decision_text = f"Économie: {abs(result['cost_difference']):,.0f} MAD"
             else:
                 recommendation = "TAUX FIXE"
-                extra_cost = result['cost_difference']
-                decision_text = f"Surcoût: {extra_cost:,.0f} MAD"
-                decision_color = "#dc3545"
+                decision_text = f"Surcoût: {result['cost_difference']:,.0f} MAD"
             
             decision_data.append({
                 'Scénario': scenario_name,
                 'Taux Variable Moyen': f"{result['avg_variable_rate']:.2f}%",
                 'Fourchette': f"{result['min_rate']:.2f}%-{result['max_rate']:.2f}%",
-                'Coût Total Variable': f"{result['variable_cost_total']:,.0f} MAD",
                 'Différence vs Fixe': decision_text,
-                'Recommandation': recommendation
+                'Recommandation': recommendation,
+                'Période Analysée': f"{result['analysis_period']} ans"
             })
         
         decision_df = pd.DataFrame(decision_data)
@@ -550,28 +581,123 @@ def main():
         
         # Final recommendation
         variable_count = sum(1 for r in analysis.values() if r['cost_difference'] < 0)
-        avg_diff = np.mean([r['cost_difference'] for r in analysis.values()])
         
-        if variable_count >= 2 and avg_diff < -200000:
-            final_rec = "TAUX VARIABLE"
+        if variable_count >= 2:
+            final_rec = "TAUX VARIABLE FAVORABLE"
             final_color = "#28a745"
-            final_reason = "Majorité des scénarios VAR favorisent le taux variable"
+            final_reason = f"Sur l'horizon de prédiction ({analysis['Cas_de_Base']['analysis_period']} ans), la majorité des scénarios favorisent le taux variable"
         elif variable_count == 0:
-            final_rec = "TAUX FIXE"
+            final_rec = "TAUX FIXE RECOMMANDÉ"
             final_color = "#dc3545"
-            final_reason = "Tous les scénarios VAR favorisent le taux fixe"
+            final_reason = f"Sur l'horizon de prédiction ({analysis['Cas_de_Base']['analysis_period']} ans), tous les scénarios favorisent le taux fixe"
         else:
-            final_rec = "STRATÉGIE MIXTE"
+            final_rec = "SITUATION INCERTAINE"
             final_color = "#ffc107"
-            final_reason = "Signaux mixtes - approche équilibrée recommandée"
+            final_reason = "Les scénarios sont partagés - décision à évaluer selon votre tolérance au risque"
         
         st.markdown(f"""
         <div class="recommendation-panel" style="background: linear-gradient(135deg, {final_color}, {final_color}AA);">
-            <h2>🎯 DÉCISION FINALE SOFAC (VAR)</h2>
+            <h2>Recommandation SOFAC</h2>
             <h3>{final_rec}</h3>
             <p><strong>Justification:</strong> {final_reason}</p>
-            <p><strong>Montant:</strong> {loan_amount}M MAD | <strong>Durée:</strong> {loan_duration} ans</p>
-            <p><strong>Méthodologie:</strong> Vector Autoregression (VAR) - Ordre {st.session_state.optimal_lag}</p>
+            <p><strong>Horizon d'analyse:</strong> {analysis['Cas_de_Base']['analysis_period']} ans (horizon de prédiction fiable)</p>
+            <p><strong>Précision du modèle:</strong> ±{st.session_state.validation['mae']:.3f}% (MAE historique)</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with tab4:
+        st.header("Méthodologie et Limitations")
+        
+        st.subheader("Approche Méthodologique")
+        
+        st.markdown("""
+        ### 1. Modèle VAR (Vector Autoregression)
+        
+        Le modèle utilise une approche vectorielle autorégressive qui capture les interdépendances entre:
+        - Taux directeur de Bank Al-Maghrib
+        - Inflation sous-jacente
+        - Rendement des bons du Trésor 52 semaines
+        
+        **Avantages:**
+        - Capture les relations dynamiques entre variables économiques
+        - Méthodologie standard en économétrie et banque centrale
+        - Permet de modéliser les effets de transmission de la politique monétaire
+        
+        ### 2. Processus de Validation
+        
+        Le modèle a été validé par une approche de "backtesting":
+        1. Entraînement sur données historiques (jusqu'à il y a 12 mois)
+        2. Prédiction des 12 derniers mois
+        3. Comparaison avec les valeurs réelles observées
+        4. Calcul des métriques d'erreur (MAE, RMSE, MAPE)
+        
+        Cette validation donne une mesure objective de la précision attendue.
+        
+        ### 3. Génération des Scénarios
+        
+        Les trois scénarios ne sont pas arbitraires:
+        - **Cas de Base:** Prédiction centrale du modèle VAR
+        - **Conservateur:** Borne supérieure (+1.5 × MAE historique)
+        - **Optimiste:** Borne inférieure (-1.5 × MAE historique)
+        
+        Ces intervalles reflètent l'incertitude historique du modèle.
+        """)
+        
+        st.subheader("Limitations Importantes")
+        
+        st.markdown(f"""
+        <div class="warning-box">
+            <h4>🔍 Facteurs Non Pris en Compte</h4>
+            <ul>
+                <li>Chocs économiques imprévisibles (crises, pandémies, etc.)</li>
+                <li>Changements de politique monétaire non anticipés</li>
+                <li>Événements géopolitiques</li>
+                <li>Modifications structurelles de l'économie</li>
+                <li>Conditions climatiques extrêmes (sécheresse, etc.)</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+        ### Fiabilité par Horizon
+        
+        | Horizon | Fiabilité | Utilisation Recommandée |
+        |---------|-----------|------------------------|
+        | 1-3 mois | Très élevée | Décisions tactiques |
+        | 3-6 mois | Élevée | Planification court terme |
+        | 6-12 mois | Moyenne | Analyse de tendances |
+        | 12-24 mois | Limitée | Scénarios exploratoires |
+        | >24 mois | Très faible | Non recommandé |
+        
+        ### Recommandations d'Usage
+        
+        ✅ **Utilisations appropriées:**
+        - Comparer taux fixe vs variable sur 2 ans maximum
+        - Identifier les tendances à court terme
+        - Évaluer différents scénarios économiques
+        - Analyse de sensibilité des décisions de financement
+        
+        ❌ **Utilisations inappropriées:**
+        - Prédire avec certitude les taux futurs
+        - Planifier des stratégies au-delà de 2 ans
+        - Prendre des décisions sans considérer d'autres facteurs
+        - Ignorer les avis d'experts et les indicateurs avancés
+        
+        ### Mise à Jour du Modèle
+        
+        Le modèle doit être régulièrement recalibré:
+        - Ajout des nouvelles données mensuelles publiées par BAM
+        - Revalidation trimestrielle des performances
+        - Ajustement des paramètres si la précision se dégrade
+        """)
+        
+        st.markdown(f"""
+        <div class="validation-box">
+            <h4>📊 Performance Actuelle du Modèle</h4>
+            <p><strong>Erreur moyenne (MAE):</strong> ±{st.session_state.validation['mae']:.3f}%</p>
+            <p><strong>Erreur relative (MAPE):</strong> {st.session_state.validation['mape']:.2f}%</p>
+            <p><strong>Dernière validation:</strong> {st.session_state.validation['test_start_date'].strftime('%B %Y')} - {st.session_state.validation['actual'].index[-1].strftime('%B %Y')}</p>
+            <p><strong>Données historiques:</strong> {len(st.session_state.df)} mois ({st.session_state.df.index[0].strftime('%B %Y')} - {st.session_state.df.index[-1].strftime('%B %Y')})</p>
         </div>
         """, unsafe_allow_html=True)
     
@@ -586,14 +712,12 @@ def main():
         
         st.markdown(f"""
         <div style="text-align: center; color: #666; font-size: 0.8rem;">
-            <p style="margin: 0; font-weight: bold; color: #2a5298;">SOFAC - Modèle VAR de Prédiction des Rendements</p>
+            <p style="margin: 0; font-weight: bold; color: #2a5298;">SOFAC - Modèle VAR Validé | Horizon 24 Mois</p>
             <p style="margin: 0; color: #FF6B35;">Dites oui au super crédit</p>
-            <p style="margin: 0.5rem 0;">Méthodologie VAR Avancée | Dernière mise à jour: {current_time}</p>
-            <p style="margin: 0;"><em>Prédictions basées sur l'analyse vectorielle autorégressive</em></p>
+            <p style="margin: 0.5rem 0;">Précision Historique: ±{st.session_state.validation['mae']:.3f}% | Dernière mise à jour: {current_time}</p>
+            <p style="margin: 0;"><em>Modèle validé sur données historiques - Fiabilité décroissante au-delà de 12 mois</em></p>
         </div>
         """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
-
-
