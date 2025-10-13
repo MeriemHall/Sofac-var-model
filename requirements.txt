@@ -2,7 +2,4 @@ streamlit
 pandas
 numpy
 plotly
-statsmodels
-scipy
-patsy
-scikit-learn
+openpyxl
